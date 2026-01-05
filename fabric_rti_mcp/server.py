@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -102,6 +103,7 @@ def main() -> None:
             logger.info(f"Path: {config.http_path}")
             logger.info(f"Stateless HTTP: {config.stateless_http}")
             logger.info(f"Use OBO flow: {config.use_obo_flow}")
+            logger.info(f"Skip auth: {config.skip_auth}")
 
         # TODO: Add telemetry configuration here
 
@@ -115,12 +117,22 @@ def main() -> None:
         fastmcp_class = FoundryCompatibleMCP if config.use_ai_foundry_compat else FastMCP
 
         if config.transport == "http":
+            # When skip_auth is enabled, allow any host (for ngrok/proxy scenarios)
+            transport_security = None
+            if config.skip_auth:
+                transport_security = TransportSecuritySettings(
+                    enable_dns_rebinding_protection=False,
+                    allowed_hosts=["*"],
+                    allowed_origins=["*"],
+                )
+
             fastmcp_server = fastmcp_class(
                 name,
                 host=config.http_host,
                 port=config.http_port,
                 streamable_http_path=config.http_path,
                 stateless_http=config.stateless_http,
+                transport_security=transport_security,
             )
         else:
             fastmcp_server = fastmcp_class(name)
@@ -131,8 +143,11 @@ def main() -> None:
         # 2. Add HTTP-specific features if in HTTP mode
         if config.transport == "http":
             add_health_endpoint(fastmcp_server)
-            logger.info("Adding authorization middleware")
-            add_auth_middleware(fastmcp_server)
+            if config.skip_auth:
+                logger.warning("Skipping authentication middleware - using default credentials")
+            else:
+                logger.info("Adding authorization middleware")
+                add_auth_middleware(fastmcp_server)
 
         # TBD - Add telemetry
 

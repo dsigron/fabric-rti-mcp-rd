@@ -5,6 +5,7 @@ import httpx
 from azure.identity import ChainedTokenCredential, DefaultAzureCredential
 
 from fabric_rti_mcp.config import GlobalFabricRTIConfig, logger
+from fabric_rti_mcp.services.kusto.kusto_connection import get_auth_token
 
 
 class FabricAPIHttpClient:
@@ -46,15 +47,21 @@ class FabricAPIHttpClient:
         )
 
     def _get_access_token(self) -> str:
-        try:
-            # Get token from Azure credential
-            token = self.credential.get_token(self.token_scope)
+        # Check if we have a bearer token from HTTP auth (set by auth middleware)
+        token = get_auth_token()
+        if token:
+            logger.debug("Using bearer token from HTTP request for Fabric API")
+            return token
 
-            if not token:
+        try:
+            # Get token from Azure credential (DefaultAzureCredential)
+            token_response = self.credential.get_token(self.token_scope)
+
+            if not token_response:
                 raise Exception("Failed to acquire token from Azure credential")
 
-            logger.debug(f"Successfully acquired Fabric API token (expires: {token.expires_on})")
-            return token.token
+            logger.debug(f"Successfully acquired Fabric API token (expires: {token_response.expires_on})")
+            return token_response.token
 
         except Exception as e:
             logger.error(f"Failed to get Fabric API access token: {e}")

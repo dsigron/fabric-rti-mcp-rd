@@ -24,6 +24,7 @@ class GlobalFabricRTIEnvVarNames:
     enable_eventstream = "FABRIC_RTI_ENABLE_EVENTSTREAM"
     enable_activator = "FABRIC_RTI_ENABLE_ACTIVATOR"
     enable_map = "FABRIC_RTI_ENABLE_MAP"
+    skip_auth = "FABRIC_RTI_SKIP_AUTH"
 
 
 DEFAULT_FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
@@ -39,6 +40,7 @@ DEFAULT_FABRIC_RTI_ENABLE_KUSTO = True
 DEFAULT_FABRIC_RTI_ENABLE_EVENTSTREAM = True
 DEFAULT_FABRIC_RTI_ENABLE_ACTIVATOR = True
 DEFAULT_FABRIC_RTI_ENABLE_MAP = True
+DEFAULT_FABRIC_RTI_SKIP_AUTH = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -56,6 +58,7 @@ class GlobalFabricRTIConfig:
     enable_eventstream: bool
     enable_activator: bool
     enable_map: bool
+    skip_auth: bool
 
     @staticmethod
     def from_env() -> GlobalFabricRTIConfig:
@@ -83,6 +86,7 @@ class GlobalFabricRTIConfig:
             enable_eventstream=os.getenv(GlobalFabricRTIEnvVarNames.enable_eventstream, str(DEFAULT_FABRIC_RTI_ENABLE_EVENTSTREAM)).lower() in ("true", "1", "yes"),
             enable_activator=os.getenv(GlobalFabricRTIEnvVarNames.enable_activator, str(DEFAULT_FABRIC_RTI_ENABLE_ACTIVATOR)).lower() in ("true", "1", "yes"),
             enable_map=os.getenv(GlobalFabricRTIEnvVarNames.enable_map, str(DEFAULT_FABRIC_RTI_ENABLE_MAP)).lower() in ("true", "1", "yes"),
+            skip_auth=os.getenv(GlobalFabricRTIEnvVarNames.skip_auth, str(DEFAULT_FABRIC_RTI_SKIP_AUTH)).lower() in ("true", "1", "yes"),
         )
 
     @staticmethod
@@ -103,6 +107,7 @@ class GlobalFabricRTIConfig:
             GlobalFabricRTIEnvVarNames.enable_eventstream,
             GlobalFabricRTIEnvVarNames.enable_activator,
             GlobalFabricRTIEnvVarNames.enable_map,
+            GlobalFabricRTIEnvVarNames.skip_auth,
         ]
         for env_var in env_vars:
             if os.getenv(env_var) is not None:
@@ -124,6 +129,9 @@ class GlobalFabricRTIConfig:
         parser.add_argument(
             "--use-ai-foundry-compat", action="store_true", help="Enable or disable AI Foundry compatibility mode"
         )
+        parser.add_argument(
+            "--skip-auth", action="store_true", help="Skip authentication in HTTP mode (use default credentials)"
+        )
         args, _ = parser.parse_known_args()
 
         transport = base_config.transport
@@ -139,6 +147,7 @@ class GlobalFabricRTIConfig:
         use_ai_foundry_compat = (
             args.use_ai_foundry_compat if args.use_ai_foundry_compat is not None else base_config.use_ai_foundry_compat
         )
+        skip_auth = args.skip_auth if args.skip_auth is not None else base_config.skip_auth
 
         return GlobalFabricRTIConfig(
             fabric_api_base=base_config.fabric_api_base,
@@ -154,6 +163,7 @@ class GlobalFabricRTIConfig:
             enable_eventstream=base_config.enable_eventstream,
             enable_activator=base_config.enable_activator,
             enable_map=base_config.enable_map,
+            skip_auth=skip_auth,
         )
 
 
