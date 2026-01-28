@@ -595,7 +595,8 @@ def kusto_univariate_anomaly_detection(
     :param client_request_properties: Optional dictionary of additional client request properties.
     :return: The query result as a columnar dict. Each row represents an anomalous point
         and includes partition key values (if provided), Timestamp, Value, Baseline,
-        AnomalyDirection (Spike or Drop), and AnomalyScore.
+        AnomalyDirection (Spike or Drop), and AnomalyScore. Also includes 'executed_kql'
+        field containing the KQL query that was executed.
     """
 
     if threshold <= 0:
@@ -642,12 +643,233 @@ def kusto_univariate_anomaly_detection(
     | order by abs(AnomalyScore) desc
     """
 
-    return _execute(
+    result = _execute(
         query,
         cluster_uri,
         database=database,
         client_request_properties=client_request_properties,
     )
+    result["executed_kql"] = query.strip()
+    return result
+
+def kusto_change_point_detection(
+    cluster_uri: str,
+    table_name: str,
+    time_column: str,
+    start_time: str,
+    end_time: str,
+    bin_size: str,
+    metric_column: str | None = None,
+    aggregation_function: str = "avg",
+    filter_condition: str | None = None,
+    trend_threshold: float = 0.4,
+    jump_threshold: float = 0.4,
+    partition_keys: list[str] | None = None,
+    gap_filling_method: str = "none",
+    gap_filling_const_value: float = 0.0,
+    database: str | None = None,
+    client_request_properties: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Detects change points (step changes and trends) in a time series using the series_shapes_fl algorithm.
+
+    Unlike univariate anomaly detection which detects spikes/dips (temporary deviations), this tool
+    detects permanent structural changes where the metric shifts to a new baseline.
+
+    Change types detected:
+    - StepUp: Sudden increase to a new baseline
+    - StepDown: Sudden decrease to a new baseline
+    - TrendUp: Gradual increasing trend
+    - TrendDown: Gradual decreasing trend
+
+    :param cluster_uri: The URI of the Kusto cluster.
+    :param table_name: The Kusto table to analyze.
+    :param time_column: The datetime column used for time bucketing.
+    :param start_time: A KQL datetime expression defining the start of the analysis window
+        (e.g., "datetime(2024-01-01)").
+    :param end_time: A KQL datetime expression defining the end of the analysis window.
+    :param bin_size: A KQL timespan literal defining the aggregation granularity
+        (e.g., "1m", "10m", "1h").
+    :param metric_column: Optional numeric column to analyze. If not provided, change points are
+        detected on event volume (count). If provided, the specified aggregation_function is applied.
+    :param aggregation_function: Aggregation function for the metric column. Supported: "count", "avg",
+        "sum", "dcount", "median", "min", "max". Defaults to "avg".
+    :param filter_condition: Optional KQL filter condition to apply before analysis
+        (e.g., "Status == 'Error'").
+    :param trend_threshold: Threshold for detecting trends (0.0-1.0). Higher values require stronger
+        trends. Defaults to 0.4.
+    :param jump_threshold: Threshold for detecting step changes (0.0-1.0). Higher values require
+        larger jumps. Defaults to 0.4.
+    :param partition_keys: Optional list of column names to partition by.
+        When provided, change point detection is performed independently per partition.
+    :param gap_filling_method: Method for handling missing data points: "none", "forward", "backward",
+        "linear", or "const". Defaults to "none".
+    :param gap_filling_const_value: Constant value to use when gap_filling_method is "const".
+        Defaults to 0.0.
+    :param database: Optional database name. If not provided, uses the default database.
+    :param client_request_properties: Optional dictionary of additional client request properties.
+    :return: The query result as a columnar dict. Each row represents a detected change point
+        and includes partition key values (if provided), ChangeType, TrendScore, JumpScore,
+        and SplitIndex (the index where the change occurred). Also includes 'executed_kql'
+        field containing the KQL query that was executed.
+    """
+
+    query = _build_change_point_detection_query(
+        table_name=table_name,
+        time_column=time_column,
+        start_time=start_time,
+        end_time=end_time,
+        bin_size=bin_size,
+        metric_column=metric_column,
+        aggregation_function=aggregation_function,
+        filter_condition=filter_condition,
+        trend_threshold=trend_threshold,
+        jump_threshold=jump_threshold,
+        partition_keys=partition_keys,
+        gap_filling_method=gap_filling_method,
+        gap_filling_const_value=gap_filling_const_value,
+    )
+
+    result = _execute(
+        query,
+        cluster_uri,
+        database=database,
+        client_request_properties=client_request_properties,
+    )
+    result["executed_kql"] = query.strip()
+    return result
+
+
+def _build_change_point_detection_query(
+    table_name: str,
+    time_column: str,
+    start_time: str,
+    end_time: str,
+    bin_size: str,
+    metric_column: str | None,
+    aggregation_function: str,
+    filter_condition: str | None,
+    trend_threshold: float,
+    jump_threshold: float,
+    partition_keys: list[str] | None,
+    gap_filling_method: str,
+    gap_filling_const_value: float,
+) -> str:
+    """Builds the KQL query for change point detection using series_shapes_fl."""
+
+    # series_shapes_fl function embedded as a query-defined function
+    # Reference: https://learn.microsoft.com/en-us/kusto/functions-library/series-shapes-fl
+    series_shapes_fl_function = """let series_shapes_fl=(series:dynamic, advanced:bool=false)
+{
+    let n = array_length(series);
+    let xs = array_sort_asc(series);
+    let low_idx = tolong(n*0.1);
+    let high_idx = tolong(n*0.9);
+    let low_pct = todouble(xs[low_idx]);
+    let high_pct = todouble(xs[high_idx]);
+    let norm_range = high_pct-low_pct;
+    let lf = series_fit_line_dynamic(series);
+    let slope = todouble(lf.slope);
+    let rsquare = todouble(lf.rsquare);
+    let rel_slope = abs(n*slope/norm_range);
+    let sign_slope = iff(slope >= 0.0, 1.0, -1.0);
+    let norm_slope = sign_slope*rel_slope/(rel_slope+0.1);
+    let trend_score = norm_slope*rsquare;
+    let lf2=series_fit_2lines_dynamic(series);
+    let lslope = todouble(lf2.left.slope);
+    let rslope = todouble(lf2.right.slope);
+    let rsquare2 = todouble(lf2.rsquare);
+    let split_idx = tolong(lf2.split_idx);
+    let last_left = todouble(lf2.left.interception)+lslope*split_idx;
+    let first_right = todouble(lf2.right.interception)+rslope;
+    let jump = first_right-last_left;
+    let rel_jump = abs(jump/norm_range);
+    let sign_jump = iff(first_right >= last_left, 1.0, -1.0);
+    let norm_jump = sign_jump*rel_jump/(rel_jump+0.1);
+    let jump_score1 = norm_jump*rsquare2;
+    let norm_rslope = abs(rslope/norm_range);
+    let jump_score = iff((sign_jump*rslope >= 0.0 or norm_rslope < 0.02) and split_idx between((0.1*n)..(0.9*n)), jump_score1, 0.0);
+    let res = iff(advanced, bag_pack("n", n, "low_pct", low_pct, "high_pct", high_pct, "norm_range", norm_range, "slope", slope, "rsquare", rsquare, "rel_slope", rel_slope, "norm_slope", norm_slope,
+                              "trend_score", trend_score, "split_idx", split_idx, "jump", jump, "rsquare2", rsquare2, "last_left", last_left, "first_right", first_right, "rel_jump", rel_jump,
+                              "lslope", lslope, "rslope", rslope, "norm_rslope", norm_rslope, "norm_jump", norm_jump, "jump_score", jump_score)
+                              , bag_pack("trend_score", trend_score, "jump_score", jump_score));
+    res
+};"""
+
+    # Build aggregation expression
+    if not metric_column:
+        aggregation = "count()"
+    elif aggregation_function == "median":
+        aggregation = f"percentile({metric_column}, 50.0)"
+    else:
+        aggregation = f"{aggregation_function}({metric_column})"
+
+    # Build partition clause
+    by_clause = ""
+    partition_project_prefix = ""
+    if partition_keys:
+        cleaned_keys = [k.strip() for k in partition_keys if k and k.strip()]
+        if cleaned_keys:
+            by_clause = f" by {', '.join(cleaned_keys)}"
+            partition_project_prefix = f"{', '.join(cleaned_keys)}, "
+
+    # Build gap filling clauses
+    make_series_default, gap_filling_extend = _get_gap_filling_clauses(
+        gap_filling_method, gap_filling_const_value
+    )
+
+    # Build base query with optional filter
+    base_query = table_name
+    if filter_condition:
+        base_query = f"{table_name}\n| where {filter_condition}"
+
+    # Build the complete query
+    query = f"""{series_shapes_fl_function}
+let _start = {start_time};
+let _end = {end_time};
+{base_query}
+| where {time_column} between (_start .. _end)
+| make-series value={aggregation}{make_series_default} on {time_column} from _start to _end step {bin_size}{by_clause}{gap_filling_extend}
+| extend shapes = series_shapes_fl(value, true)
+| extend 
+    TrendScore = todouble(shapes.trend_score),
+    JumpScore = todouble(shapes.jump_score),
+    SplitIndex = toint(shapes.split_idx)
+| where abs(TrendScore) >= {trend_threshold} or abs(JumpScore) >= {jump_threshold}
+| extend ChangeType = case(
+    abs(JumpScore) >= {jump_threshold} and JumpScore > 0, "StepUp",
+    abs(JumpScore) >= {jump_threshold} and JumpScore < 0, "StepDown",
+    abs(TrendScore) >= {trend_threshold} and TrendScore > 0, "TrendUp",
+    abs(TrendScore) >= {trend_threshold} and TrendScore < 0, "TrendDown",
+    "None"
+)
+| project {partition_project_prefix}ChangeType, TrendScore, JumpScore, SplitIndex
+| order by abs(JumpScore) + abs(TrendScore) desc"""
+
+    return query
+
+
+def _get_gap_filling_clauses(gap_filling_method: str, gap_filling_const_value: float) -> tuple[str, str]:
+    """
+    Generates the KQL clauses for gap filling based on the selected method.
+
+    :param gap_filling_method: The gap filling method: "none", "forward", "backward", "linear", or "const"
+    :param gap_filling_const_value: The constant value to use when method is "const"
+    :return: A tuple containing (make_series_default, gap_filling_extend)
+    """
+    method = (gap_filling_method or "none").lower()
+
+    if method == "forward":
+        return " default=double(null)", "\n| extend value = series_fill_forward(value)"
+    elif method == "backward":
+        return " default=double(null)", "\n| extend value = series_fill_backward(value)"
+    elif method == "linear":
+        return " default=double(null)", "\n| extend value = series_fill_linear(value)"
+    elif method == "const":
+        return "", f"\n| extend value = series_fill_const(value, {gap_filling_const_value})"
+    else:  # "none" or default - use make-series default of 0
+        return "", ""
+
 
 def rootcause_analysis_query(
     cluster_uri: str,
